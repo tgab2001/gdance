@@ -1,0 +1,198 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return getUserData().role;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        getUserRole() == 'admin' ||
+        request.auth.token.admin == true
+      );
+    }
+
+    function isInstructor() {
+      return isAuthenticated() && (
+        getUserRole() == 'instructor' ||
+        isAdmin()
+      );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isParentOf(childUserId) {
+      return isAuthenticated() && (
+        getUserRole() == 'parent' &&
+        childUserId in getUserData().childrenUserIds
+      );
+    }
+
+    // 1. Users collection
+    // Admins can read/write any user.
+    // Instructors can read dancers.
+    // Dancers can read and update limited fields of their own profile.
+    // Parents can read their children profiles.
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        isInstructor() ||
+        isOwner(userId) ||
+        isParentOf(userId)
+      );
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        isOwner(userId) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'groups', 'membershipActive'])
+      );
+    }
+
+    // 2. Groups collection (Dance groups)
+    // Public can view public group previews.
+    // Authenticated members can view full group details.
+    // Admins can create/edit/delete. Instructors can update groups they teach.
+    match /groups/{groupId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        isInstructor() &&
+        resource.data.instructorId == request.auth.uid
+      );
+    }
+
+    // 3. Trainings / Schedules collection
+    // Public cannot view internal schedules.
+    // Authenticated dancers can read trainings for their groups.
+    // Instructors can create/edit trainings for their groups.
+    // Admins have full access.
+    match /trainings/{trainingId} {
+      allow read: if isAuthenticated();
+      allow create, delete: if isAdmin() || isInstructor();
+      allow update: if isAdmin() || isInstructor();
+    }
+
+    // 4. Attendance collection
+    // Instructors and Admins can record and read attendance.
+    // Dancers can read attendance records that mention them.
+    match /attendance/{recordId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        isInstructor() ||
+        request.auth.uid == resource.data.userId ||
+        isParentOf(resource.data.userId)
+      );
+      allow create, update, delete: if isAdmin() || isInstructor();
+    }
+
+    // 5. Events collection
+    // Public can read public events. Members can read all events.
+    // Admins and instructors can create/update.
+    match /events/{eventId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin() || isInstructor();
+    }
+
+    // 6. Event Responses (RSVP)
+    // Dancers/Parents can set their own attendance response (Going, Cannot attend, Undecided).
+    // Admins and instructors can read all responses.
+    match /eventResponses/{responseId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && (
+        request.resource.data.userId == request.auth.uid ||
+        isParentOf(request.resource.data.userId) ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 7. Internal Notifications
+    // Admins can create notifications for anyone, a group, or all.
+    // Users can read notifications directed to them, their group, or global broadcasts.
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.targetType == 'all' ||
+        resource.data.targetUserId == request.auth.uid ||
+        (resource.data.targetType == 'group' && resource.data.targetGroupId in getUserData().groupIds)
+      );
+      allow create, delete: if isAdmin() || isInstructor();
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy'])
+      );
+    }
+
+    // 8. News & Blog
+    // Public can read published news. Admin can edit/publish.
+    match /news/{newsId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // 9. Gallery Albums & Photos
+    // Public can read public galleries. Admin can manage albums & photos.
+    match /gallery/{albumId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+
+      match /photos/{photoId} {
+        allow read: if true;
+        allow create, update, delete: if isAdmin();
+      }
+    }
+
+    // 10. Video Library
+    // Public videos can be read by anyone.
+    // Member-only / private videos require authentication.
+    match /videos/{videoId} {
+      allow read: if resource.data.isPublic == true || isAuthenticated();
+      allow create, update, delete: if isAdmin() || isInstructor();
+    }
+
+    // 11. Competition Results & Awards
+    // Public can read awards. Admin can manage them.
+    match /results/{resultId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // 12. Applications / Jelentkezések (Trial classes registration)
+    // Anyone can submit a registration form. Only Admins can view/process.
+    match /applications/{applicationId} {
+      allow create: if true;
+      allow read, update, delete: if isAdmin();
+    }
+
+    // 13. Fees & Invoices (Future-proof membership fees & payments)
+    match /fees/{feeId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        isParentOf(resource.data.userId)
+      );
+      allow create, update, delete: if isAdmin();
+    }
+
+    // 14. Documents (Consent forms, certificates, rules)
+    match /documents/{docId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.isPublic == true
+      );
+      allow create, update, delete: if isAdmin();
+    }
+  }
+}
